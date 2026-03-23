@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2 Instance Monitoring and Tagging Automation'
+
+Parameters:
+  AccountId:
+    Type: String
+    Default: '123456789012'
+  Region:
+    Type: String
+    Default: 'us-east-1'
+  InstanceType:
+    Type: String
+    Default: 't3.micro'
+  TotalCount:
+    Type: Number
+    Default: 6
+  AlertEmails:
+    Type: String
+    Default: 'admin@example.com'
+
+Resources:
+  StateStorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  EC2MonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EC2MonitoringPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:CreateTags
+                  - sns:CreateTopic
+                  - sns:Subscribe
+                  - sns:Publish
+                  - sns:ListSubscriptionsByTopic
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::${StateStorageBucket}/*'
+
+  EC2MonitoringFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ec2-monitoring-tagging
+      Runtime: python3.9
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt EC2MonitoringRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          ACCOUNT_ID: !Ref AccountId
+          REGION: !Ref Region
+          INSTANCE_TYPE: !Ref InstanceType
+          TOTAL_COUNT: !Ref TotalCount
+          MAP_TAGGING_KEY: 'env'
+          MAP_TAGGING_VALUES: 'prd,stg,dev'
+          MAP_TAGGING_VALUES_MAX_COUNT: '2'
+          ALERT_EMAILS: !Ref AlertEmails
+          STATE_BUCKET: !Ref StateStorageBucket
+      Code:
+        ZipFile: |
+          # Lambda code will be deployed separately
+
+  ScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: 'Trigger EC2 monitoring every minute'
+      ScheduleExpression: 'rate(1 minute)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt EC2MonitoringFunction.Arn
+          Id: 'EC2MonitoringTarget'
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref EC2MonitoringFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduleRule.Arn
+
+Outputs:
+  LambdaFunctionArn:
+    Description: 'ARN of the Lambda function'
+    Value: !GetAtt EC2MonitoringFunction.Arn
+  
+  ScheduleRuleArn:
+    Description: 'ARN of the EventBridge rule'
+    Value: !GetAtt ScheduleRule.Arn
+  
+  StateStorageBucket:
+    Description: 'S3 bucket for state storage'
+    Value: !Ref StateStorageBucket
